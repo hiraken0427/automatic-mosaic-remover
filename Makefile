@@ -1,14 +1,26 @@
 CXX ?= g++
 PKG_CONFIG ?= pkg-config
 BUILD_DIR ?= bin
-IMGUI_DIR ?= third_party/imgui
+IMGUI_DIR ?= vendor/imgui
 
 CPPFLAGS += -Isrc
 CXXFLAGS ?= -O2 -g
 PROJECT_FLAGS := -std=c++20 -Wall -Wextra -Wpedantic
+WINDOWS_BUILD := $(filter Windows_NT,$(OS))$(findstring mingw,$(MAKE_HOST))
 
-ifeq ($(OS),Windows_NT)
+ifneq ($(WINDOWS_BUILD),)
 EXE := .exe
+DEP_PREFIX ?= vendor/windows-x64
+WINDOWS_DIST := dist/windows-x64
+GUI_LINK_FLAGS := -mwindows
+ifeq ($(DEP_PREFIX),vendor/windows-x64)
+RUNTIME_DIR := $(WINDOWS_DIST)
+RUNTIME_DLLS := $(patsubst $(RUNTIME_DIR)/%,$(BUILD_DIR)/%,$(wildcard $(RUNTIME_DIR)/*.dll))
+# Link compiler runtimes statically and keep SDL2 and FFmpeg as DLL imports.
+RUNTIME_LINK_FLAGS := -static
+SDL_LIBS ?= -L"$(DEP_PREFIX)/lib" -l:libSDL2.dll.a
+FFMPEG_LIBS ?= -L"$(DEP_PREFIX)/lib" -l:libavformat.dll.a -l:libavcodec.dll.a -l:libavutil.dll.a -l:libswscale.dll.a
+endif
 else
 THREAD_FLAGS := -pthread
 endif
@@ -38,7 +50,7 @@ MEDIA_TEST := $(BUILD_DIR)/media-test$(EXE)
 .PHONY: all run test test-media clean check-imgui
 all: $(APP)
 
-run: $(APP)
+run: all
 	"./$(APP)"
 
 test: $(DOMAIN_TEST)
@@ -50,14 +62,28 @@ test-media: $(MEDIA_TEST)
 check-imgui:
 	@test -f "$(IMGUI_DIR)/backends/imgui_impl_sdlrenderer2.cpp" || { echo "Set IMGUI_DIR to a Dear ImGui 1.90.1 or compatible source tree."; exit 1; }
 
-$(APP): $(DOMAIN) $(APPLICATION) $(MEDIA) $(GUI) $(IMGUI_OBJECTS)
-	$(CXX) $(LDFLAGS) $(THREAD_FLAGS) $^ $(SDL_LIBS) $(FFMPEG_LIBS) $(LDLIBS) -o "$@"
+$(APP): $(DOMAIN) $(APPLICATION) $(MEDIA) $(GUI) $(IMGUI_OBJECTS) | $(RUNTIME_DLLS)
+	$(CXX) $(LDFLAGS) $(THREAD_FLAGS) $(GUI_LINK_FLAGS) $(RUNTIME_LINK_FLAGS) $^ $(SDL_LIBS) $(FFMPEG_LIBS) $(LDLIBS) -o "$@"
 
 $(DOMAIN_TEST): tests/domain_test.cpp $(DOMAIN)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PROJECT_FLAGS) $(THREAD_FLAGS) $(LDFLAGS) $^ -o "$@"
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PROJECT_FLAGS) $(THREAD_FLAGS) $(LDFLAGS) $(RUNTIME_LINK_FLAGS) $^ -o "$@"
 
-$(MEDIA_TEST): tests/media_test.cpp $(DOMAIN) $(APPLICATION) $(MEDIA)
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PROJECT_FLAGS) $(THREAD_FLAGS) $(LDFLAGS) $^ $(FFMPEG_LIBS) -o "$@"
+$(MEDIA_TEST): tests/media_test.cpp $(DOMAIN) $(APPLICATION) $(MEDIA) | $(RUNTIME_DLLS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(PROJECT_FLAGS) $(THREAD_FLAGS) $(LDFLAGS) $(RUNTIME_LINK_FLAGS) $^ $(FFMPEG_LIBS) -o "$@"
+
+ifeq ($(DEP_PREFIX),vendor/windows-x64)
+ifneq ($(WINDOWS_BUILD),)
+.PHONY: package-windows
+package-windows: $(APP)
+	cp "$<" "$(WINDOWS_DIST)/mosaic-remover.exe"
+
+ifneq ($(RUNTIME_DLLS),)
+$(RUNTIME_DLLS): $(BUILD_DIR)/%.dll: $(RUNTIME_DIR)/%.dll
+	@mkdir -p "$(@D)"
+	cp "$<" "$@"
+endif
+endif
+endif
 
 $(MEDIA): CPPFLAGS += $(FFMPEG_CFLAGS)
 $(GUI): CPPFLAGS += $(SDL_CFLAGS) -I"$(IMGUI_DIR)"

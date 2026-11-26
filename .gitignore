@@ -7,4 +7,4 @@
 *.mov
 *.avi
 *.mkv
-
+!/dist/windows-x64/mosaic-remover.exe

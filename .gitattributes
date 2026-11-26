@@ -1,0 +1,12 @@
+# Keep source archive hashes and shell scripts stable across platforms.
+*.sh text eol=lf
+vendor/sources/SHA256SUMS text eol=lf
+vendor/sources/*.tar.* binary
+vendor/windows-x64/lib/*.a binary
+dist/windows-x64/*.dll binary
+dist/windows-x64/*.exe binary
+# Preserve the formatting of vendored source and upstream license texts.
+vendor/imgui/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+vendor/windows-x64/include/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+dist/windows-x64/licenses/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+LICENSE whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

@@ -2,23 +2,42 @@
 
 I use this desktop app to reduce a block mosaic with a manually selected frame interval, region, and grid. The current version estimates a single frame at a time by combining block fidelity with total variation. Automatic detection, tracking, and reconstruction from nearby frames are planned in the [Detailed Design](doc/detailed_design.md). A permanently hidden region has insufficient evidence to recover its original fine detail.
 
-## Build and run
+## Run on Windows
 
-I tested the Linux build with GCC 14.2, SDL 2.32.4, FFmpeg 7.1.5, and the Dear ImGui 1.90.1 source tree. On Linux, install GCC with C++20 support, GNU Make, pkg-config, and the development packages for SDL2 and FFmpeg, including libavformat, libavcodec, libavutil, and libswscale. On Debian 13 the development packages are `libsdl2-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev`. Set `IMGUI_DIR` to the extracted Dear ImGui 1.90.1 release.
+I include a portable Windows x64 build in [Windows x64](dist/windows-x64/). Download and extract the entire repository, then open `dist/windows-x64/mosaic-remover.exe`. Keep the bundled DLLs next to the executable.
 
-```sh
-make IMGUI_DIR=/path/to/imgui-1.90.1
-./bin/mosaic-remover
-```
+## Build and test
 
-For w64devkit, I use the same Makefile with a directory containing the x86-64 MinGW-compatible SDL2 and FFmpeg headers and import libraries. The default layout is `DEP_PREFIX/include` and `DEP_PREFIX/lib`. I place the required DLLs beside the executable or on `PATH`. Windows build and runtime validation remain open.
+On Windows x64 I build from the repository root in w64devkit. The Makefile uses the bundled MinGW import libraries, headers, and Dear ImGui source. It copies the runtime DLLs next to the newly built executable. Use a C++20-capable w64devkit toolchain. I verified the default build with w64devkit 2.11.0 under Wine and used the portable package to export H.264 video. Windows 11 26H2 hardware validation remains open.
 
 ```sh
-make DEP_PREFIX=C:/path/to/deps IMGUI_DIR=C:/path/to/imgui-1.90.1
+make
 ./bin/mosaic-remover.exe
 ```
 
-I run `make test` for the numerical and boundary checks. This target only needs a C++20 compiler and Make. I run `make test-media` for the video workflow checks. It also uses Python 3, the FFmpeg development libraries, and the `ffmpeg` and `ffprobe` executables with libx264 available.
+On Linux I use GCC with C++20 support, GNU Make, pkg-config, and the system SDL2 and FFmpeg 7 development libraries. On Debian 13 the development packages are `libsdl2-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev`. I test with GCC 14.2, SDL 2.32.4, FFmpeg 7.1.5, and the bundled Dear ImGui 1.90.1 source.
+
+```sh
+make
+./bin/mosaic-remover
+```
+
+I run `make test` for the numerical and boundary checks. It only needs a C++20 compiler and Make. I run `make test-media` for the video workflow checks. It also uses Python 3 and `ffmpeg` and `ffprobe` executables with libx264 available for fixture generation.
+
+## Rebuild the Windows package
+
+I build the bundled libraries on Linux with x86-64 MinGW-w64 GCC and binutils, GNU Make, pkg-config, NASM, and the standard archive tools. [Windows Dependency Sources](vendor/sources/) records the inputs, compiler versions, and checksums. The script verifies and builds from the local archives.
+
+```sh
+JOBS=4 ./tools/build-windows-deps.sh
+make -j4 OS=Windows_NT CXX=x86_64-w64-mingw32-g++ BUILD_DIR=bin/windows-x64 LDFLAGS=-s package-windows
+```
+
+On Windows I can rebuild the executable with `make package-windows` from w64devkit. When updating library versions, I also update the source archives and checksum manifest, rebuild the package, remove any obsolete DLLs, and test H.264 and FFV1 export before committing the corresponding files.
+
+## License
+
+I license the application under GPL-2.0-or-later. The Windows package links to the GPL configuration of FFmpeg with libx264 support. [License Text](LICENSE) and [Third-Party Notices](dist/windows-x64/licenses/) document the terms. The application source, corresponding dependency source archives, and build instructions are available with the binaries in this repository.
 
 ## Edit and export
 
