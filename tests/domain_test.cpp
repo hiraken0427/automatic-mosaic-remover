@@ -1,4 +1,4 @@
-#include "domain/detection.hpp"
+#include "domain/tracking.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -88,6 +88,51 @@ void one_direction_tests(bool intermittent) {
     std::cout << "One-direction mosaic bands preserve coverage and stay within the target.\n";
 }
 
+void tracking_tests() {
+    const Rect region{27, 29, 131, 125};
+    const auto frame = [&](int dx, int dy, bool mosaicked, bool background_moves) {
+        return make_raster(220, 195, [&](int x, int y) {
+            const int local_x = x - dx, local_y = y - dy;
+            if (mosaicked && contains(region, local_x, local_y)) {
+                const int col = (local_x - region.left) / 8, row = (local_y - region.top) / 12;
+                return 33 + (col * 61 + row * 41 + col * row * 7) % 174;
+            }
+            if (background_moves) {
+                x = local_x;
+                y = local_y;
+            }
+            return (x * 87 + y * 59 + x * y * 13 + 8000) & 255;
+        });
+    };
+    const auto seed = frame(0, 0, true, true);
+    const TrackRegion start{{8, 12, 3, 5}, {region}};
+
+    for (bool background_moves : {false, true}) {
+        const auto next = frame(9, 7, true, background_moves);
+        const auto tracked = track_next(seed, next, start);
+        assert(tracked);
+        assert(tracked->grid.width == 8 && tracked->grid.height == 12);
+        assert(tracked->grid.phase_x == 4 && tracked->grid.phase_y == 0);
+        const Rect moved{36, 36, 140, 132};
+        int covered = 0;
+        for (auto r : tracked->regions) {
+            assert(intersect(r, moved) == r);
+            covered += (r.right - r.left) * (r.bottom - r.top);
+        }
+        assert(covered >= 90 * 104 * 96 / 100);
+        const auto harmonic = track_next(seed, next, {{4, 12, 3, 5}, {region}});
+        assert(harmonic && harmonic->grid.width == 4 && harmonic->grid.phase_x == 0);
+        assert(!track_next(next, frame(14, 11, false, background_moves), *tracked));
+    }
+
+    const auto cut = make_raster(220, 195, [](int, int) { return 8; });
+    assert(!track_next(seed, cut, start));
+    std::stop_source stop;
+    stop.request_stop();
+    assert(!track_next(seed, frame(9, 7, true, true), start, stop.get_token()));
+    std::cout << "Tracking follows a moving mosaic and stops at occlusion, scene cuts, and cancellation.\n";
+}
+
 void detection_tests() {
     const Rect scene{0, 0, 180, 156};
     const Rect mosaic_region{27, 29, 131, 125};
@@ -168,6 +213,7 @@ int main() {
     weak_boundary_tests();
     one_direction_tests(false);
     one_direction_tests(true);
+    tracking_tests();
     constexpr int width = 15, height = 9, stride = width * 3 + 5;
     Raster source{width, height, stride, std::vector<std::uint8_t>(height * stride, 231)};
     Raster clean = source;

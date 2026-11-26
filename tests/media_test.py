@@ -61,6 +61,38 @@ def verify_mask(source, output, first=2, end=6):
     assert changed > 0
 
 
+def verify_tracking(binary, tmp):
+    width, height = 220, 195
+
+    def value(frame, x, y):
+        if frame == 6:
+            return 8
+        x -= 3 * frame
+        y -= 2 * frame
+        if 27 <= x < 131 and 29 <= y < 125:
+            col, row = (x - 27) // 8, (y - 29) // 12
+            return 33 + (col * 61 + row * 41 + col * row * 7) % 174
+        return (x * 87 + y * 59 + x * y * 13 + 8000) & 255
+
+    raw, source, output = [tmp / name for name in ("motion.rgb", "motion.mkv", "tracked.mkv")]
+    gray = bytes(value(f, x, y) for f in range(8) for y in range(height) for x in range(width))
+    raw.write_bytes(bytes(sample for component in gray for sample in (component,) * 3))
+    ffmpeg("-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{width}x{height}",
+           "-framerate", "25", "-i", str(raw), "-c:v", "ffv1", "-pix_fmt", "bgr0", str(source))
+    command(binary, str(source), str(output), "lossless", "tracked")
+    original, restored = rgb(source), rgb(output)
+    assert len(original) == len(restored) == width * height * 8 * 3
+    changed = set()
+    for i, (a, b) in enumerate(zip(original, restored)):
+        if a == b:
+            continue
+        pixel = i // 3
+        frame, y, x = pixel // (width * height), pixel // width % height, pixel % width
+        assert 1 <= frame <= 5 and 27 <= x - 3 * frame < 131 and 29 <= y - 2 * frame < 125 and x < 142
+        changed.add(frame)
+    assert changed == set(range(1, 6))
+
+
 def main(binary, tmp):
     raw = tmp / "fixture.rgb"
     raw.write_bytes(bytes(
@@ -99,7 +131,8 @@ def main(binary, tmp):
     command(binary, str(source), str(cancelled), "lossless", "cancel")
     assert cancelled.read_bytes() == b"existing destination"
     assert not list(tmp.glob(".mosaic-export-*"))
-    print("Preview, detection, per-frame export, VFR, audio copy, exact mask, and cancellation passed.")
+    verify_tracking(binary, tmp)
+    print("Preview, detection, tracking, per-frame export, VFR, audio copy, exact mask, and cancellation passed.")
 
 
 if __name__ == "__main__":

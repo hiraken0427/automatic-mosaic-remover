@@ -1,9 +1,10 @@
 #pragma once
 
-#include "domain/detection.hpp"
+#include "domain/tracking.hpp"
 
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 
@@ -78,9 +79,17 @@ private:
     std::optional<Frame> frame_;
 };
 
+using Track = std::map<std::int64_t, TrackRegion>;
+
+Track track_video(const Media& media, const std::filesystem::path& source,
+                  const VideoIndex& index, const Edit& edit, std::stop_token stop,
+                  const Progress& progress);
+void restore_frame(Frame& frame, const Edit& edit, const Track* track,
+                   int iterations, std::stop_token stop);
+
 void export_video(const Media& media, const std::filesystem::path& source,
                   const VideoIndex& index, const Edit& edit, const ExportOptions& options,
-                  std::stop_token stop, const Progress& progress);
+                  std::stop_token stop, const Progress& progress, const Track* track = nullptr);
 void check_cancelled(std::stop_token stop);
 
 }

@@ -76,13 +76,14 @@ fs::path path_from_input(const char* value) {
     return fs::path(std::u8string(utf8));
 }
 
-enum class Job { open, original, detect, restored, export_video };
+enum class Job { open, original, detect, track, restored, export_video };
 
 struct Result {
     std::optional<VideoIndex> index;
     std::optional<Frame> frame;
     std::string error;
     std::vector<Candidate> candidates{};
+    std::shared_ptr<const Track> track{};
 };
 
 ImVec2 orient(ImVec2 point, int turns) {
@@ -134,7 +135,10 @@ public:
 
         if (running && job_ == Job::export_video)
             ImGui::ProgressBar(static_cast<float>(progress_.load()) / index_->frames);
-        else if (running && job_ == Job::open)
+        else if (running && job_ == Job::track) {
+            ImGui::TextUnformatted("Tracking selected range...");
+            ImGui::ProgressBar(static_cast<float>(progress_.load()) / (last_ - first_ + 1));
+        } else if (running && job_ == Job::open)
             ImGui::Text("Indexing video (%lld frames)", static_cast<long long>(progress_.load()));
         else if (running && job_ == Job::detect)
             ImGui::TextUnformatted("Detecting mosaic in this frame...");
@@ -221,12 +225,17 @@ private:
                 last_ = index_->frames;
                 copy_audio_ = index_->info.has_audio;
                 accepted_.reset();
+                track_.reset();
             }
             if (job_ == Job::detect) {
                 candidates_ = std::move(result_.candidates);
                 selected_candidate_ = 0;
                 if (candidates_.empty())
                     status_ = "No mosaic candidate found in this region.";
+            }
+            if (result_.track) {
+                track_ = std::move(result_.track);
+                clear_preview();
             }
             if (job_ == Job::export_video)
                 status_ = "Export complete.";
@@ -290,17 +299,20 @@ private:
             grid_ = {grid[0], grid[1], grid[2], grid[3]};
             changed = true;
         }
-        if (changed)
+        if (changed) {
+            track_.reset();
             clear_preview();
+        }
 
         detection_controls();
 
         if (ImGui::Button("Preview restoration"))
             request([this] {
                 const auto plan = edit();
-                start(Job::restored, [this, source = source_, ordinal = shown_ - 1, plan](std::stop_token stop) {
+                start(Job::restored, [this, source = source_, ordinal = shown_ - 1,
+                                      plan, track = track_](std::stop_token stop) {
                     auto frame = preview_.frame(media_, source, ordinal, stop);
-                    restore(frame.raster, ordinal, plan, 60, stop);
+                    restore_frame(frame, plan, track.get(), 60, stop);
                     return Result{{}, std::move(frame), {}};
                 });
             });
@@ -360,12 +372,37 @@ private:
             });
         if (accepted_) {
             ImGui::SameLine();
-            ImGui::Text("Mask applied to frame %lld", static_cast<long long>(accepted_->ordinal + 1));
+            ImGui::Text("Accepted frame %lld", static_cast<long long>(accepted_->ordinal + 1));
+            ImGui::SameLine();
+            if (ImGui::Button("Track range"))
+                request([this] {
+                    const auto plan = edit();
+                    candidates_.clear();
+                    start(Job::track, [this, source = source_, index = *index_, plan](std::stop_token stop) {
+                        Result result;
+                        result.track = std::make_shared<Track>(track_video(media_, source, index, plan, stop,
+                            [this](auto count) { progress_ = count; }));
+                        return result;
+                    });
+                });
             ImGui::SameLine();
             if (ImGui::Button("Use manual ROI")) {
                 accepted_.reset();
+                track_.reset();
                 clear_preview();
             }
+        }
+        if (track_) {
+            const auto frame = track_->find(shown_ - 1);
+            const bool within_roi = frame != track_->end() &&
+                std::ranges::any_of(frame->second.regions, [this](Rect region) {
+                    return !intersect(region, roi_).empty();
+                });
+            ImGui::Text("Track: %lld-%lld of %lld-%lld | %s",
+                        static_cast<long long>(track_->begin()->first + 1),
+                        static_cast<long long>(track_->rbegin()->first + 1),
+                        static_cast<long long>(first_), static_cast<long long>(last_),
+                        within_roi ? "Tracked" : frame == track_->end() ? "Not tracked" : "Outside ROI");
         }
         if (candidates_.empty())
             return;
@@ -393,6 +430,7 @@ private:
                 auto& candidate = candidates_[selected_candidate_];
                 grid_ = candidate.grid;
                 accepted_ = FrameMask{shown_ - 1, std::move(candidate.regions)};
+                track_.reset();
                 candidates_.clear();
                 clear_preview();
                 status_.clear();
@@ -408,9 +446,9 @@ private:
 
     void save(Edit plan, ExportOptions options) {
         start(Job::export_video, [this, plan, options = std::move(options),
-                                  source = source_, index = *index_](std::stop_token stop) {
+                                  source = source_, index = *index_, track = track_](std::stop_token stop) {
             export_video(media_, source, index, plan, options, stop,
-                         [this](auto count) { progress_ = count; });
+                         [this](auto count) { progress_ = count; }, track.get());
             return Result{};
         });
     }
@@ -419,6 +457,7 @@ private:
         if (roi_ == roi)
             return;
         roi_ = roi;
+        track_.reset();
         candidates_.clear();
         clear_preview();
     }
@@ -480,7 +519,10 @@ private:
             };
             if (!candidates_.empty())
                 fill_mask(candidates_[selected_candidate_].regions, IM_COL32(255, 177, 62, 105));
-            else if (accepted_ && accepted_->ordinal == shown_ - 1)
+            else if (track_) {
+                if (const auto frame = track_->find(shown_ - 1); frame != track_->end())
+                    fill_mask(frame->second.regions, IM_COL32(60, 220, 190, 90));
+            } else if (accepted_ && accepted_->ordinal == shown_ - 1)
                 fill_mask(accepted_->regions, IM_COL32(60, 220, 190, 90));
         }
         const auto clipped = intersect(roi_, {0, 0, info.width, info.height});
@@ -505,6 +547,7 @@ private:
     Rect roi_{};
     Grid grid_{8, 8, 0, 0};
     std::optional<FrameMask> accepted_;
+    std::shared_ptr<const Track> track_;
     std::vector<Candidate> candidates_;
     std::size_t selected_candidate_ = 0;
     Texture original_{nullptr, SDL_DestroyTexture}, restored_{nullptr, SDL_DestroyTexture};
