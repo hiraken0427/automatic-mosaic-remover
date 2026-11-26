@@ -1,6 +1,6 @@
 #pragma once
 
-#include "domain/restoration.hpp"
+#include "domain/detection.hpp"
 
 #include <filesystem>
 #include <functional>
@@ -70,6 +70,8 @@ class Preview {
 public:
     Frame frame(const Media& media, const std::filesystem::path& source,
                 std::int64_t ordinal, std::stop_token stop);
+    std::vector<Candidate> candidates(const Media& media, const std::filesystem::path& source,
+                                      std::int64_t ordinal, Rect roi, std::stop_token stop);
 private:
     std::filesystem::path source_;
     std::unique_ptr<Reader> reader_;

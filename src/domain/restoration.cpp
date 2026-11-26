@@ -62,7 +62,36 @@ void restore(Raster& frame, std::int64_t ordinal, const Edit& edit,
     if (ordinal < edit.first || ordinal >= edit.end || iterations <= 0 || stop.stop_requested())
         return;
 
-    const auto [left, top, right, bottom] = edit.roi;
+    Rect bounds = edit.roi;
+    if (edit.mask) {
+        if (ordinal != edit.mask->ordinal)
+            return;
+        bounds = {frame.width, frame.height, 0, 0};
+        for (const auto region : edit.mask->regions) {
+            const auto clipped = intersect(region, edit.roi);
+            if (!clipped.empty())
+                bounds = {std::min(bounds.left, clipped.left), std::min(bounds.top, clipped.top),
+                          std::max(bounds.right, clipped.right), std::max(bounds.bottom, clipped.bottom)};
+        }
+        if (bounds.empty())
+            return;
+    }
+    const auto [left, top, right, bottom] = bounds;
+    const int mask_width = right - left;
+    const auto mask_index = [=](int x, int y) {
+        return static_cast<std::size_t>(y - top) * mask_width + (x - left);
+    };
+    std::vector<std::uint8_t> writable;
+    if (edit.mask) {
+        writable.resize(static_cast<std::size_t>(mask_width) * (bottom - top));
+        for (auto region : edit.mask->regions) {
+            region = intersect(region, bounds);
+            if (!region.empty())
+                for (int y = region.top; y < region.bottom; ++y)
+                    std::fill_n(writable.data() + mask_index(region.left, y), region.right - region.left, 1);
+        }
+    }
+
     const auto grid = edit.grid;
     const auto grid_left = cell_start(left, grid.phase_x, grid.width);
     const auto grid_top = cell_start(top, grid.phase_y, grid.height);
@@ -79,9 +108,7 @@ void restore(Raster& frame, std::int64_t ordinal, const Edit& edit,
     std::vector<Sample> samples(static_cast<std::size_t>(width) * height);
     std::vector<Cell> cells(cell_count + 1);
     std::vector<std::uint8_t> restored(static_cast<std::size_t>(right - left) * (bottom - top) * 3);
-    const auto roi_index = [=](int x, int y, int channel) {
-        return (static_cast<std::size_t>(y - top) * (right - left) + x - left) * 3 + channel;
-    };
+    const auto roi_index = [&](int x, int y, int channel) { return mask_index(x, y) * 3 + channel; };
 
     for (int channel = 0; channel < 3; ++channel) {
         std::fill(cells.begin(), cells.end(), Cell{});
@@ -91,7 +118,8 @@ void restore(Raster& frame, std::int64_t ordinal, const Edit& edit,
                 pixel = {};
                 pixel.value = frame.pixels[byte_index(frame, x, y, channel)] / 255.0F;
                 pixel.extrapolated = pixel.value;
-                pixel.editable = x >= left && x < right && y >= top && y < bottom;
+                pixel.editable = x >= left && x < right && y >= top && y < bottom &&
+                                 (writable.empty() || writable[mask_index(x, y)]);
                 pixel.cell = cell_count;
                 if (x >= grid_left && x < grid_right && y >= grid_top && y < grid_bottom) {
                     pixel.cell = static_cast<std::size_t>(((y - grid_top) / grid.height) * columns
@@ -139,6 +167,8 @@ void restore(Raster& frame, std::int64_t ordinal, const Edit& edit,
                 for (int x = left - x0; x < right - x0; ++x) {
                     const auto i = static_cast<std::size_t>(y) * width + x;
                     auto& pixel = samples[i];
+                    if (!pixel.editable)
+                        continue;
                     const auto& cell = cells[pixel.cell];
                     const float divergence = pixel.horizontal + pixel.vertical
                         - (x ? samples[i - 1].horizontal : 0) - (y ? samples[i - width].vertical : 0);
@@ -163,9 +193,13 @@ void restore(Raster& frame, std::int64_t ordinal, const Edit& edit,
 
     if (stop.stop_requested())
         return;
-    for (int y = top; y < bottom; ++y)
-        std::copy_n(restored.data() + roi_index(left, y, 0), (right - left) * 3,
-                    frame.pixels.data() + byte_index(frame, left, y, 0));
+    for (int y = top; y < bottom; ++y) {
+        for (int x = left; x < right; ++x) {
+            if (writable.empty() || writable[mask_index(x, y)])
+                std::copy_n(restored.data() + roi_index(x, y, 0), 3,
+                            frame.pixels.data() + byte_index(frame, x, y, 0));
+        }
+    }
 }
 
 }

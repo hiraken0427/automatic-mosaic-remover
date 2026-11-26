@@ -42,6 +42,11 @@ Frame Preview::frame(const Media& media, const std::filesystem::path& source,
     return *frame_;
 }
 
+std::vector<Candidate> Preview::candidates(const Media& media, const std::filesystem::path& source,
+                                           std::int64_t ordinal, Rect roi, std::stop_token stop) {
+    return detect(frame(media, source, ordinal, stop).raster, roi, stop);
+}
+
 void export_video(const Media& media, const std::filesystem::path& source,
                   const VideoIndex& index, const Edit& edit, const ExportOptions& options,
                   std::stop_token stop, const Progress& progress) {

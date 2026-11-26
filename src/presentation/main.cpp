@@ -76,12 +76,13 @@ fs::path path_from_input(const char* value) {
     return fs::path(std::u8string(utf8));
 }
 
-enum class Job { open, original, restored, export_video };
+enum class Job { open, original, detect, restored, export_video };
 
 struct Result {
     std::optional<VideoIndex> index;
     std::optional<Frame> frame;
     std::string error;
+    std::vector<Candidate> candidates{};
 };
 
 ImVec2 orient(ImVec2 point, int turns) {
@@ -135,6 +136,8 @@ public:
             ImGui::ProgressBar(static_cast<float>(progress_.load()) / index_->frames);
         else if (running && job_ == Job::open)
             ImGui::Text("Indexing video (%lld frames)", static_cast<long long>(progress_.load()));
+        else if (running && job_ == Job::detect)
+            ImGui::TextUnformatted("Detecting mosaic in this frame...");
         else if (running)
             ImGui::TextUnformatted("Preparing preview...");
         else if (!status_.empty())
@@ -203,8 +206,8 @@ private:
                     show_restored_ = true;
                 } else {
                     original_ = std::move(texture);
-                    restored_.reset();
-                    show_restored_ = false;
+                    clear_preview();
+                    candidates_.clear();
                     shown_ = result_.frame->ordinal + 1;
                     requested_ = shown_;
                     shown_pts_ = result_.frame->pts;
@@ -217,6 +220,13 @@ private:
                 first_ = 1;
                 last_ = index_->frames;
                 copy_audio_ = index_->info.has_audio;
+                accepted_.reset();
+            }
+            if (job_ == Job::detect) {
+                candidates_ = std::move(result_.candidates);
+                selected_candidate_ = 0;
+                if (candidates_.empty())
+                    status_ = "No mosaic candidate found in this region.";
             }
             if (job_ == Job::export_video)
                 status_ = "Export complete.";
@@ -227,7 +237,9 @@ private:
     Edit edit() const {
         if (first_ < 1 || last_ > index_->frames)
             throw std::invalid_argument("Select frames within the video.");
-        Edit value{first_ - 1, last_, roi_, grid_};
+        Edit value{first_ - 1, last_, roi_, grid_, accepted_};
+        if (value.mask && (value.mask->ordinal < value.first || value.mask->ordinal >= value.end))
+            throw std::invalid_argument("Include the accepted frame in the selected range.");
         validate(value, {index_->info.width, index_->info.height, 0, {}});
         return value;
     }
@@ -267,14 +279,11 @@ private:
         int roi[] = {roi_.left, roi_.top, roi_.right, roi_.bottom};
         ImGui::SetNextItemWidth(360);
         if (ImGui::InputInt4("ROI edges (L, T, R, B)", roi)) {
-            roi_ = {roi[0], roi[1], roi[2], roi[3]};
-            changed = true;
+            set_roi({roi[0], roi[1], roi[2], roi[3]});
         }
         ImGui::SameLine();
-        if (ImGui::Button("Whole frame")) {
-            roi_ = {0, 0, index_->info.width, index_->info.height};
-            changed = true;
-        }
+        if (ImGui::Button("Whole frame"))
+            set_roi({0, 0, index_->info.width, index_->info.height});
         int grid[] = {grid_.width, grid_.height, grid_.phase_x, grid_.phase_y};
         ImGui::SetNextItemWidth(360);
         if (ImGui::InputInt4("Grid (W, H, X, Y)", grid)) {
@@ -283,6 +292,8 @@ private:
         }
         if (changed)
             clear_preview();
+
+        detection_controls();
 
         if (ImGui::Button("Preview restoration"))
             request([this] {
@@ -335,6 +346,66 @@ private:
         }
     }
 
+    void detection_controls() {
+        if (ImGui::Button("Detect mosaic"))
+            request([this] {
+                start(Job::detect, [this, source = source_, ordinal = shown_ - 1,
+                                    roi = roi_](std::stop_token stop) {
+                    Result result;
+                    result.candidates = preview_.candidates(media_, source, ordinal, roi, stop);
+                    return result;
+                });
+                candidates_.clear();
+                show_restored_ = false;
+            });
+        if (accepted_) {
+            ImGui::SameLine();
+            ImGui::Text("Mask applied to frame %lld", static_cast<long long>(accepted_->ordinal + 1));
+            ImGui::SameLine();
+            if (ImGui::Button("Use manual ROI")) {
+                accepted_.reset();
+                clear_preview();
+            }
+        }
+        if (candidates_.empty())
+            return;
+
+        std::array<char, 100> label{};
+        const auto candidate_label = [&](std::size_t i) {
+            const auto& candidate = candidates_[i];
+            const auto grid = candidate.grid;
+            std::snprintf(label.data(), label.size(), "%zu: %d x %d, offset %d, %d, evidence %.2f",
+                          i + 1, grid.width, grid.height, grid.phase_x, grid.phase_y, candidate.evidence);
+            return label.data();
+        };
+        ImGui::SetNextItemWidth(335);
+        if (ImGui::BeginCombo("##candidate", candidate_label(selected_candidate_))) {
+            for (std::size_t i = 0; i < candidates_.size(); ++i)
+                if (ImGui::Selectable(candidate_label(i), i == selected_candidate_))
+                    selected_candidate_ = i;
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Use candidate")) {
+            request([this] {
+                if (shown_ < first_ || shown_ > last_)
+                    throw std::invalid_argument("Include this frame in the selected range.");
+                auto& candidate = candidates_[selected_candidate_];
+                grid_ = candidate.grid;
+                accepted_ = FrameMask{shown_ - 1, std::move(candidate.regions)};
+                candidates_.clear();
+                clear_preview();
+                status_.clear();
+            });
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Dismiss candidate") && !candidates_.empty()) {
+            candidates_.erase(candidates_.begin() + selected_candidate_);
+            if (selected_candidate_ && selected_candidate_ >= candidates_.size())
+                --selected_candidate_;
+        }
+    }
+
     void save(Edit plan, ExportOptions options) {
         start(Job::export_video, [this, plan, options = std::move(options),
                                   source = source_, index = *index_](std::stop_token stop) {
@@ -342,6 +413,14 @@ private:
                          [this](auto count) { progress_ = count; });
             return Result{};
         });
+    }
+
+    void set_roi(Rect roi) {
+        if (roi_ == roi)
+            return;
+        roi_ = roi;
+        candidates_.clear();
+        clear_preview();
     }
 
     void clear_preview() {
@@ -374,9 +453,8 @@ private:
             drag_ = pixel(ImGui::GetIO().MousePos);
         if (drag_) {
             const auto current = pixel(ImGui::GetIO().MousePos);
-            roi_ = {std::min((*drag_)[0], current[0]), std::min((*drag_)[1], current[1]),
-                    std::max((*drag_)[0], current[0]) + 1, std::max((*drag_)[1], current[1]) + 1};
-            clear_preview();
+            set_roi({std::min((*drag_)[0], current[0]), std::min((*drag_)[1], current[1]),
+                     std::max((*drag_)[0], current[0]) + 1, std::max((*drag_)[1], current[1]) + 1});
             if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
                 drag_.reset();
         }
@@ -384,12 +462,32 @@ private:
         auto* texture = show_restored_ && restored_ ? restored_.get() : original_.get();
         draw->AddImageQuad(reinterpret_cast<ImTextureID>(texture), position(0, 0), position(info.width, 0),
                            position(info.width, info.height), position(0, info.height));
-        const auto a = position(static_cast<float>(std::clamp(roi_.left, 0, info.width)),
-                                static_cast<float>(std::clamp(roi_.top, 0, info.height)));
-        const auto b = position(static_cast<float>(std::clamp(roi_.right, 0, info.width)),
-                                static_cast<float>(std::clamp(roi_.bottom, 0, info.height)));
-        draw->AddRect({std::min(a.x, b.x), std::min(a.y, b.y)}, {std::max(a.x, b.x), std::max(a.y, b.y)},
-                      IM_COL32(60, 220, 190, 255));
+        const auto corners = [&](Rect rect) {
+            const auto a = position(rect.left, rect.top);
+            const auto b = position(rect.right, rect.bottom);
+            return std::array<ImVec2, 2>{{{std::min(a.x, b.x), std::min(a.y, b.y)},
+                                          {std::max(a.x, b.x), std::max(a.y, b.y)}}};
+        };
+        if (!show_restored_) {
+            const auto fill_mask = [&](const std::vector<Rect>& regions, ImU32 color) {
+                for (auto region : regions) {
+                    region = intersect(region, roi_);
+                    if (!region.empty()) {
+                        const auto [a, b] = corners(region);
+                        draw->AddRectFilled(a, b, color);
+                    }
+                }
+            };
+            if (!candidates_.empty())
+                fill_mask(candidates_[selected_candidate_].regions, IM_COL32(255, 177, 62, 105));
+            else if (accepted_ && accepted_->ordinal == shown_ - 1)
+                fill_mask(accepted_->regions, IM_COL32(60, 220, 190, 90));
+        }
+        const auto clipped = intersect(roi_, {0, 0, info.width, info.height});
+        if (!clipped.empty()) {
+            const auto [a, b] = corners(clipped);
+            draw->AddRect(a, b, IM_COL32(60, 220, 190, 255));
+        }
     }
 
     SDL_Renderer* renderer_;
@@ -406,6 +504,9 @@ private:
     std::int64_t first_ = 1, last_ = 1, shown_ = 1, requested_ = 1, shown_pts_ = 0;
     Rect roi_{};
     Grid grid_{8, 8, 0, 0};
+    std::optional<FrameMask> accepted_;
+    std::vector<Candidate> candidates_;
+    std::size_t selected_candidate_ = 0;
     Texture original_{nullptr, SDL_DestroyTexture}, restored_{nullptr, SDL_DestroyTexture};
     bool show_restored_ = false, lossless_ = false, copy_audio_ = false;
     std::optional<std::array<int, 2>> drag_;

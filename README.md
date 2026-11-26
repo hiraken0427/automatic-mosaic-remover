@@ -1,6 +1,6 @@
 # Automatic Mosaic Remover
 
-I use this desktop app to reduce a block mosaic with a manually selected frame interval, region, and grid. The current version estimates a single frame at a time by combining block fidelity with total variation. Automatic detection, tracking, and reconstruction from nearby frames are planned in the [Detailed Design](doc/detailed_design.md). A permanently hidden region has insufficient evidence to recover its original fine detail.
+I use this desktop app to reduce a block mosaic with a manually selected frame interval, region, and grid. I can also detect candidate grids and review their masks on the current frame. Restoration estimates each frame independently by combining block fidelity with total variation. Tracking and reconstruction from nearby frames are planned in the [Detailed Design](doc/detailed_design.md). A permanently hidden region has insufficient evidence to recover its original fine detail.
 
 ## Run on Windows
 
@@ -41,6 +41,8 @@ I license the application under GPL-2.0-or-later. The Windows package links to t
 
 ## Edit and export
 
-I drop a local video onto the window or enter its path and open it. The app indexes the frame count in the background before enabling the scrubber. I choose the first and last frames inclusively, then drag the region over the video or type its exact bounds. I enter the block width, height, and X and Y offsets in input pixels. The bottom and right ROI edges are exclusive.
+I drop a local video onto the window or enter its path and open it. The app indexes the frame count in the background before enabling the scrubber. I choose the first and last frames inclusively, then drag the region over the video or type its exact bounds. The bottom and right ROI edges are exclusive. For manual restoration, I enter the block width, height, and X and Y offsets in input pixels.
+
+I click **Detect mosaic** to review candidates on the current frame. The amber overlay shows the selected candidate, and its menu shows the dimensions, offsets, and evidence score. Regular textures can produce grid evidence, so I use **Dismiss candidate** to discard a proposal or **Use candidate** to accept it. An accepted mask appears in teal. I can refine it by narrowing the ROI or adjusting the grid fields. I can keep one accepted candidate at a time, and export applies its mask only to the frame where I accepted it. **Use manual ROI** returns to editing the selected frame interval with a fixed ROI and grid.
 
 I select **Preview restoration** to process the current frame and use **Show restored** to compare it with the source. I enter an output path and export to H.264 MP4 or lossless FFV1 MKV. MP4 requires the libx264 encoder and even video dimensions. The lossless output preserves unchanged RGB pixels in the processing raster. I can copy compatible audio and cancel an export while it is running. I can scrub backward immediately after an index completes, but this first version decodes forward from the beginning to find an earlier frame.

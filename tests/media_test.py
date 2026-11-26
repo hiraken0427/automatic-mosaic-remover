@@ -47,14 +47,14 @@ def verify_media(source, output):
     assert audio(source) == audio(output)
 
 
-def verify_mask(source, output):
+def verify_mask(source, output, first=2, end=6):
     original, restored = rgb(source), rgb(output)
     assert len(original) == len(restored) == 8 * 24 * 32 * 3
     changed = 0
     for i, (before, after) in enumerate(zip(original, restored)):
         pixel = i // 3
         frame, row, column = pixel // (32 * 24), pixel // 32 % 24, pixel % 32
-        if 2 <= frame < 6 and 5 <= column < 17 and 4 <= row < 16:
+        if first <= frame < end and 5 <= column < 17 and 4 <= row < 16:
             changed += before != after
         else:
             assert before == after, (frame, row, column)
@@ -81,6 +81,11 @@ def main(binary, tmp):
     verify_media(source, lossless)
     verify_mask(source, lossless)
 
+    detected = tmp / "detected.mkv"
+    command(binary, str(source), str(detected), "lossless", "detected")
+    verify_media(source, detected)
+    verify_mask(source, detected, first=3, end=4)
+
     compressed = tmp / "reordered.mp4"
     ffmpeg("-i", str(source), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-bf", "3",
            "-x264-params", "b-adapt=0", "-fps_mode", "passthrough", "-c:a", "aac", str(compressed))
@@ -94,7 +99,7 @@ def main(binary, tmp):
     command(binary, str(source), str(cancelled), "lossless", "cancel")
     assert cancelled.read_bytes() == b"existing destination"
     assert not list(tmp.glob(".mosaic-export-*"))
-    print("Preview, VFR and reordered video, audio copy, exact mask, and export cancellation passed.")
+    print("Preview, detection, per-frame export, VFR, audio copy, exact mask, and cancellation passed.")
 
 
 if __name__ == "__main__":

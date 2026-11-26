@@ -37,7 +37,7 @@ FFMPEG_CFLAGS ?= -I"$(DEP_PREFIX)/include"
 FFMPEG_LIBS ?= -L"$(DEP_PREFIX)/lib" -lavformat -lavcodec -lavutil -lswscale
 endif
 
-DOMAIN := $(BUILD_DIR)/domain/restoration.o
+DOMAIN := $(BUILD_DIR)/domain/restoration.o $(BUILD_DIR)/domain/detection.o
 APPLICATION := $(BUILD_DIR)/application/video.o
 MEDIA := $(BUILD_DIR)/infrastructure/ffmpeg_media.o
 GUI := $(BUILD_DIR)/presentation/main.o
