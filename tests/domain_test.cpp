@@ -23,6 +23,41 @@ bool contains(Rect region, int x, int y) {
     return x >= region.left && x < region.right && y >= region.top && y < region.bottom;
 }
 
+void weak_boundary_tests() {
+    const Rect scene{0, 0, 220, 202};
+    const Rect mosaic{27, 29, 187, 173};
+    const auto value = [&](int x, int y) {
+        if (!contains(mosaic, x, y))
+            return (x * 87 + y * 59 + x * y * 13) % 255;
+        const int col = (x - mosaic.left) / 8, row = (y - mosaic.top) / 12;
+        if (col >= 7 && col < 13 && row >= 4 && row < 8)
+            return 45 + (col * 61 + row * 41 + col * row * 7) % 160;
+        return 104 + 3 * ((col * 7 + row * 3 + col * row) % 7);
+    };
+
+    for (const bool blurred : {false, true}) {
+        const auto frame = make_raster(scene.right, scene.bottom, [&](int x, int y) {
+            const Rect interior{mosaic.left + 1, mosaic.top + 1, mosaic.right - 1, mosaic.bottom - 1};
+            if (!blurred || !contains(interior, x, y))
+                return value(x, y);
+            return (4 * value(x, y) + value(x - 1, y) + value(x + 1, y) +
+                    value(x, y - 1) + value(x, y + 1)) / 8;
+        });
+        const auto candidates = detect(frame, scene);
+        assert(!candidates.empty());
+        const auto& best = candidates.front();
+        assert(best.grid.width == 8 && best.grid.height == 12);
+        assert(best.grid.phase_x == 3 && best.grid.phase_y == 5);
+        int covered = 0;
+        for (const auto region : best.regions) {
+            assert(intersect(region, mosaic) == region);
+            covered += (region.right - region.left) * (region.bottom - region.top);
+        }
+        assert(covered >= 9 * 160 * 144 / 10);
+    }
+    std::cout << "Weak and blurred boundaries cover at least 90% of the mosaic without spill.\n";
+}
+
 void detection_tests() {
     const Rect scene{0, 0, 180, 156};
     const Rect mosaic_region{27, 29, 131, 125};
@@ -100,6 +135,7 @@ void detection_tests() {
 int main() {
     using namespace mosaic;
     detection_tests();
+    weak_boundary_tests();
     constexpr int width = 15, height = 9, stride = width * 3 + 5;
     Raster source{width, height, stride, std::vector<std::uint8_t>(height * stride, 231)};
     Raster clean = source;

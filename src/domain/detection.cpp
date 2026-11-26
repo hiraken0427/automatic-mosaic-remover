@@ -4,6 +4,7 @@
 #include <cmath>
 #include <functional>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -83,9 +84,9 @@ Axis detect_axis(const GradientSums& sums, Rect window, bool horizontal) {
                                       : sums.sum({window.left, p, window.right, p + 1}).y / across;
         lines[p - start] = edge;
         total += edge;
-        energy += std::max(0.0F, edge - 2);
+        energy += std::max(0.0F, edge - 0.75F);
     }
-    if (energy < 10)
+    if (energy < 5)
         return {};
 
     Axis best;
@@ -95,19 +96,32 @@ Axis detect_axis(const GradientSums& sums, Rect window, bool horizontal) {
         for (int i = 0; i < length; ++i) {
             const int phase = i % period;
             contrast[phase] += lines[i];
-            edge_energy[phase] += std::max(0.0F, lines[i] - 2);
+            edge_energy[phase] += std::max(0.0F, lines[i] - 0.75F);
             ++count[phase];
-            peaks[phase] += lines[i] >= 5;
+            peaks[phase] += lines[i] >= 2.5F;
         }
         for (int phase = 0; phase < period; ++phase) {
             const int boundaries = count[phase];
-            if (boundaries < 2 || peaks[phase] * 3 < boundaries * 2)
+            if (boundaries < 2 || peaks[phase] < 2 || peaks[phase] * 2 < boundaries)
                 continue;
             const float boundary_mean = contrast[phase] / boundaries;
-            const float interior_mean = (total - contrast[phase]) / (length - boundaries);
-            const float dominance = (boundary_mean - interior_mean) / (boundary_mean + interior_mean + 2);
-            const float coverage = edge_energy[phase] / energy;
-            if (dominance < 0.48F || coverage < 0.55F)
+            float interior_sum = total - contrast[phase];
+            int interior_count = length - boundaries;
+            float aligned_energy = edge_energy[phase];
+            if (period >= 5) {
+                // Allow compression to spread edge energy to the pixels beside a grid line.
+                const int before = (phase + period - 1) % period, after = (phase + 1) % period;
+                if (boundary_mean < std::max(contrast[before] / count[before],
+                                             contrast[after] / count[after]))
+                    continue;
+                interior_sum -= contrast[before] + contrast[after];
+                interior_count -= count[before] + count[after];
+                aligned_energy += 0.65F * (edge_energy[before] + edge_energy[after]);
+            }
+            const float interior_mean = std::max(0.0F, interior_sum) / interior_count;
+            const float dominance = (boundary_mean - interior_mean) / (boundary_mean + interior_mean + 1);
+            const float coverage = aligned_energy / energy;
+            if (dominance < 0.36F || coverage < 0.50F)
                 continue;
             const float score = 0.6F * dominance + 0.4F * coverage;
             if (score > best.score + 0.01F)
@@ -117,29 +131,52 @@ Axis detect_axis(const GradientSums& sums, Rect window, bool horizontal) {
     return best;
 }
 
-bool supports_cell(const GradientSums& sums, Rect cell, Grid grid) {
-    const float width = cell.right - cell.left, height = cell.bottom - cell.top;
-    const auto inner = sums.sum({cell.left + 1, cell.top + 1, cell.right, cell.bottom});
-    const float inside_x = width > 1 ? (inner.x + sums.sum({cell.left + 1, cell.top, cell.right, cell.top + 1}).x)
-                                      / ((width - 1) * height) : 0;
-    const float inside_y = height > 1 ? (inner.y + sums.sum({cell.left, cell.top + 1, cell.left + 1, cell.bottom}).y)
-                                        / (width * (height - 1)) : 0;
+struct CellEvidence {
+    float inside_x, inside_y, edge_x, edge_y;
+};
+
+CellEvidence measure_cell(const GradientSums& sums, Rect cell, Grid grid) {
+    // Keep the inner-texture measurement clear of spill from the two bordering edges.
+    const int trim_x = cell.right - cell.left >= 6;
+    const int trim_y = cell.bottom - cell.top >= 6;
+    const Rect inside{cell.left + trim_x, cell.top + trim_y,
+                      cell.right - trim_x, cell.bottom - trim_y};
+    const float width = inside.right - inside.left, height = inside.bottom - inside.top;
+    const float inside_x = width > 1 ? sums.sum({inside.left + 1, inside.top, inside.right, inside.bottom}).x
+                                        / ((width - 1) * height) : 0;
+    const float inside_y = height > 1 ? sums.sum({inside.left, inside.top + 1, inside.right, inside.bottom}).y
+                                         / (width * (height - 1)) : 0;
     const auto scope = sums.scope();
-    const auto x_edge = [&](int x) {
-        return x > scope.left && x < scope.right &&
-               sums.sum({x, cell.top, x + 1, cell.bottom}).x / height >= std::max(4.0F, 3 * inside_x);
+    const auto x_line = [&](int x) {
+        return x > scope.left && x < scope.right
+            ? sums.sum({x, inside.top, x + 1, inside.bottom}).x / height : 0.0F;
     };
-    const auto y_edge = [&](int y) {
-        return y > scope.top && y < scope.bottom &&
-               sums.sum({cell.left, y, cell.right, y + 1}).y / width >= std::max(4.0F, 3 * inside_y);
+    const auto y_line = [&](int y) {
+        return y > scope.top && y < scope.bottom
+            ? sums.sum({inside.left, y, inside.right, y + 1}).y / width : 0.0F;
     };
-    return inside_x <= 5 && inside_y <= 5 &&
-           (grid.width == 1 || x_edge(cell.left) || x_edge(cell.right)) &&
-           (grid.height == 1 || y_edge(cell.top) || y_edge(cell.bottom));
+    const auto strongest = [](auto line, int first, int last, int period) {
+        float edge = std::max(line(first), line(last));
+        if (period >= 5) {
+            // Use the inner neighboring lines, so exterior texture cannot strengthen a border.
+            edge = std::max(edge, 0.8F * std::max(line(first + 1), line(last - 1)));
+        }
+        return edge;
+    };
+    return {inside_x, inside_y, strongest(x_line, cell.left, cell.right, grid.width),
+            strongest(y_line, cell.top, cell.bottom, grid.height)};
+}
+
+bool supports_grid(CellEvidence cell, Grid grid, float floor, float ratio) {
+    constexpr float texture_limit = 7;
+    return cell.inside_x <= texture_limit && cell.inside_y <= texture_limit &&
+           (grid.width == 1 || cell.edge_x >= std::max(floor, ratio * cell.inside_x + 0.5F)) &&
+           (grid.height == 1 || cell.edge_y >= std::max(floor, ratio * cell.inside_y + 0.5F));
 }
 
 using GridKey = std::array<int, 4>;
-using Cells = std::map<std::pair<int, int>, float>;
+using Position = std::pair<int, int>;
+using Cells = std::map<Position, float>;
 
 void examine(const GradientSums& sums, Rect window, std::map<GridKey, Cells>& groups) {
     auto x = detect_axis(sums, window, true);
@@ -159,7 +196,8 @@ void examine(const GradientSums& sums, Rect window, std::map<GridKey, Cells>& gr
         for (int left = first_x; left < window.right; left += x.period) {
             const Rect cell = intersect({left, top, left + x.period, top + y.period}, scope);
             const Rect observed = intersect(cell, window);
-            if (observed.empty() || area(observed) * 2 < area(cell) || !supports_cell(sums, cell, grid))
+            if (observed.empty() || area(observed) * 2 < area(cell) ||
+                !supports_grid(measure_cell(sums, cell, grid), grid, 3.0F, 2.0F))
                 continue;
             auto& evidence = cells[{top, left}];
             evidence = std::max(evidence, std::min(x.score, y.score));
@@ -167,41 +205,107 @@ void examine(const GradientSums& sums, Rect window, std::map<GridKey, Cells>& gr
     }
 }
 
-void collect(Grid grid, Cells& cells, Rect roi, std::vector<Candidate>& candidates,
+Rect grid_cell(Rect scope, Grid grid, Position position) {
+    const auto [y, x] = position;
+    return intersect({x, y, x + grid.width, y + grid.height}, scope);
+}
+
+std::set<Position> bridge_short_gaps(const GradientSums& sums, Grid grid,
+                                     const std::set<Position>& supported, std::stop_token stop) {
+    std::set<Position> filled;
+    for (const auto& [y, x] : supported) {
+        if (stop.stop_requested())
+            break;
+        for (const auto& [dy, dx] : {Position{grid.height, 0}, Position{0, grid.width}}) {
+            for (int gap = 1; gap <= 2; ++gap) {
+                const Position missing{y + gap * dy, x + gap * dx};
+                if (supported.contains(missing))
+                    break;
+                const auto cell = grid_cell(sums.scope(), grid, missing);
+                if (cell.empty())
+                    break;
+                const auto evidence = measure_cell(sums, cell, grid);
+                if (evidence.inside_x > 3 || evidence.inside_y > 3)
+                    break;
+                if (supported.contains({missing.first + dy, missing.second + dx})) {
+                    for (int step = 1; step <= gap; ++step)
+                        filled.emplace(y + step * dy, x + step * dx);
+                    break;
+                }
+            }
+        }
+    }
+    return filled;
+}
+
+void collect(const GradientSums& sums, Grid grid, Cells& cells, Rect roi, std::vector<Candidate>& candidates,
              std::stop_token stop) {
+    // A weak edge can extend an existing two-dimensional grid but cannot start one.
+    if (cells.size() < 4)
+        return;
+    const bool grow = grid.width > 1 && grid.height > 1;
+    const auto adjacent = [&](Position position) {
+        const auto [y, x] = position;
+        return std::array{Position{y, x - grid.width}, Position{y, x + grid.width},
+                          Position{y - grid.height, x}, Position{y + grid.height, x}};
+    };
+    std::set<Position> visited;
     while (!cells.empty() && !stop.stop_requested()) {
-        std::vector<std::pair<int, int>> pending{cells.begin()->first};
+        std::vector<Position> pending{cells.begin()->first};
         Candidate candidate{grid, {}, 0};
         float score = cells.begin()->second;
+        const float weak_score = std::min(0.55F, 0.85F * score);
+        int seed_count = 1;
+        visited.insert(cells.begin()->first);
         cells.erase(cells.begin());
         for (std::size_t i = 0; i < pending.size(); ++i) {
             if (stop.stop_requested())
                 return;
-            const auto [y, x] = pending[i];
-            const Rect region = intersect({x, y, x + grid.width, y + grid.height}, roi);
-            if (!region.empty())
-                candidate.regions.push_back(region);
-            for (auto neighbor : {std::pair{y, x - grid.width}, std::pair{y, x + grid.width},
-                                  std::pair{y - grid.height, x}, std::pair{y + grid.height, x}}) {
+            for (auto neighbor : adjacent(pending[i])) {
+                if (!visited.insert(neighbor).second)
+                    continue;
                 if (auto found = cells.find(neighbor); found != cells.end()) {
                     pending.push_back(neighbor);
                     score += found->second;
+                    ++seed_count;
                     cells.erase(found);
+                } else if (grow) {
+                    const auto cell = grid_cell(sums.scope(), grid, neighbor);
+                    if (!cell.empty() &&
+                        supports_grid(measure_cell(sums, cell, grid), grid, 1.25F, 1.1F)) {
+                        pending.push_back(neighbor);
+                        score += weak_score;
+                    }
                 }
             }
         }
-        if (pending.size() < 4 || candidate.regions.empty())
+        if (pending.size() < 4 || seed_count < 2)
             continue;
-        candidate.evidence = score / pending.size();
-        std::ranges::sort(candidate.regions, {}, [](Rect r) { return std::pair{r.top, r.left}; });
-        std::vector<Rect> runs;
-        for (Rect region : candidate.regions) {
+
+        std::set<Position> component(pending.begin(), pending.end());
+        if (grow) {
+            // Similar neighboring blocks can lose their shared edge. Only fill short
+            // smooth gaps bracketed by cells within this already connected component.
+            auto filled = bridge_short_gaps(sums, grid, component, stop);
+            if (stop.stop_requested())
+                return;
+            score += 0.73F * weak_score * filled.size();
+            visited.insert(filled.begin(), filled.end());
+            component.merge(filled);
+        }
+        auto& runs = candidate.regions;
+        for (const auto& [y, x] : component) {
+            const Rect region = intersect({x, y, x + grid.width, y + grid.height}, roi);
+            if (region.empty())
+                continue;
             if (!runs.empty() && runs.back().top == region.top && runs.back().right == region.left)
                 runs.back().right = region.right;
             else
                 runs.push_back(region);
         }
-        candidate.regions = std::move(runs);
+        if (runs.empty())
+            continue;
+        candidate.evidence = score / component.size();
         candidates.push_back(std::move(candidate));
     }
 }
@@ -246,7 +350,7 @@ std::vector<Candidate> detect(const Raster& frame, Rect roi, std::stop_token sto
     }
     std::vector<Candidate> candidates;
     for (auto& [key, cells] : groups)
-        collect({key[0], key[1], key[2], key[3]}, cells, roi, candidates, stop);
+        collect(sums, {key[0], key[1], key[2], key[3]}, cells, roi, candidates, stop);
     if (stop.stop_requested())
         return {};
 
