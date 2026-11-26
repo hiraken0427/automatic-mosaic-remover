@@ -58,6 +58,36 @@ void weak_boundary_tests() {
     std::cout << "Weak and blurred boundaries cover at least 90% of the mosaic without spill.\n";
 }
 
+void one_direction_tests() {
+    for (const bool transpose : {false, true}) {
+        const auto frame = make_raster(transpose ? 202 : 260, transpose ? 260 : 202,
+                                       [=](int x, int y) {
+            if (transpose)
+                std::swap(x, y);
+            if (x < 27 || x >= 219 || y < 29 || y >= 173)
+                return (x * 87 + y * 59 + x * y * 13) % 255;
+            const int col = (x - 27) / 8, row = (y - 29) / 12;
+            if (col < 8 || col >= 16)
+                return 65 + (row * 47) % 125;
+            return 45 + (col * 61 + row * 41 + col * row * 7) % 160;
+        });
+        const Rect region = transpose ? Rect{29, 27, 173, 219} : Rect{27, 29, 219, 173};
+        const auto candidates = detect(frame, {0, 0, frame.width, frame.height});
+        assert(!candidates.empty());
+        const auto& candidate = candidates.front();
+        const auto grid = candidate.grid;
+        assert(grid.width == (transpose ? 12 : 8) && grid.height == (transpose ? 8 : 12));
+        assert(grid.phase_x == (transpose ? 5 : 3) && grid.phase_y == (transpose ? 3 : 5));
+        int covered = 0;
+        for (const auto cell : candidate.regions) {
+            assert(intersect(cell, region) == cell);
+            covered += (cell.right - cell.left) * (cell.bottom - cell.top);
+        }
+        assert(covered >= 95 * 192 * 144 / 100);
+    }
+    std::cout << "One-direction mosaic bands preserve coverage and stay within the target.\n";
+}
+
 void detection_tests() {
     const Rect scene{0, 0, 180, 156};
     const Rect mosaic_region{27, 29, 131, 125};
@@ -136,6 +166,7 @@ int main() {
     using namespace mosaic;
     detection_tests();
     weak_boundary_tests();
+    one_direction_tests();
     constexpr int width = 15, height = 9, stride = width * 3 + 5;
     Raster source{width, height, stride, std::vector<std::uint8_t>(height * stride, 231)};
     Raster clean = source;

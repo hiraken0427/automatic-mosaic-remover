@@ -167,11 +167,19 @@ CellEvidence measure_cell(const GradientSums& sums, Rect cell, Grid grid) {
             strongest(y_line, cell.top, cell.bottom, grid.height)};
 }
 
-bool supports_grid(CellEvidence cell, Grid grid, float floor, float ratio) {
+bool smooth_cell(CellEvidence cell) {
     constexpr float texture_limit = 7;
-    return cell.inside_x <= texture_limit && cell.inside_y <= texture_limit &&
-           (grid.width == 1 || cell.edge_x >= std::max(floor, ratio * cell.inside_x + 0.5F)) &&
-           (grid.height == 1 || cell.edge_y >= std::max(floor, ratio * cell.inside_y + 0.5F));
+    return cell.inside_x <= texture_limit && cell.inside_y <= texture_limit;
+}
+
+bool supports_edge(float edge, float inside, float floor, float ratio) {
+    return edge >= std::max(floor, ratio * inside + 0.5F);
+}
+
+bool supports_grid(CellEvidence cell, Grid grid, float floor, float ratio) {
+    return smooth_cell(cell) &&
+           (grid.width == 1 || supports_edge(cell.edge_x, cell.inside_x, floor, ratio)) &&
+           (grid.height == 1 || supports_edge(cell.edge_y, cell.inside_y, floor, ratio));
 }
 
 using GridKey = std::array<int, 4>;
@@ -208,6 +216,36 @@ void examine(const GradientSums& sums, Rect window, std::map<GridKey, Cells>& gr
 Rect grid_cell(Rect scope, Grid grid, Position position) {
     const auto [y, x] = position;
     return intersect({x, y, x + grid.width, y + grid.height}, scope);
+}
+
+// A low-contrast band can lose its cross-grid seams. Follow the remaining
+// seams into that band only if they recur in neighboring cells along it.
+bool supports_band(const GradientSums& sums, Grid grid, Position position,
+                   CellEvidence evidence, bool vertical_step) {
+    constexpr float floor = 1.25F, ratio = 1.1F;
+    const auto aligned = [&](CellEvidence cell) {
+        return smooth_cell(cell) && (vertical_step
+            ? supports_edge(cell.edge_x, cell.inside_x, floor, ratio)
+            : supports_edge(cell.edge_y, cell.inside_y, floor, ratio));
+    };
+    if (!aligned(evidence))
+        return false;
+
+    const auto [y, x] = position;
+    const int dx = vertical_step ? grid.width : 0;
+    const int dy = vertical_step ? 0 : grid.height;
+    int support = 1;
+    for (const int direction : {-1, 1}) {
+        for (int offset = 1; offset <= 2; ++offset) {
+            const auto cell = grid_cell(sums.scope(), grid,
+                                        {y + direction * offset * dy, x + direction * offset * dx});
+            if (cell.empty() || !aligned(measure_cell(sums, cell, grid)))
+                break;
+            if (++support == 3)
+                return true;
+        }
+    }
+    return false;
 }
 
 std::set<Position> bridge_short_gaps(const GradientSums& sums, Grid grid,
@@ -261,21 +299,29 @@ void collect(const GradientSums& sums, Grid grid, Cells& cells, Rect roi, std::v
         for (std::size_t i = 0; i < pending.size(); ++i) {
             if (stop.stop_requested())
                 return;
-            for (auto neighbor : adjacent(pending[i])) {
-                if (!visited.insert(neighbor).second)
+            const auto position = pending[i];
+            for (auto neighbor : adjacent(position)) {
+                if (visited.contains(neighbor))
                     continue;
                 if (auto found = cells.find(neighbor); found != cells.end()) {
                     pending.push_back(neighbor);
+                    visited.insert(neighbor);
                     score += found->second;
                     ++seed_count;
                     cells.erase(found);
-                } else if (grow) {
-                    const auto cell = grid_cell(sums.scope(), grid, neighbor);
-                    if (!cell.empty() &&
-                        supports_grid(measure_cell(sums, cell, grid), grid, 1.25F, 1.1F)) {
-                        pending.push_back(neighbor);
-                        score += weak_score;
-                    }
+                    continue;
+                }
+                if (!grow)
+                    continue;
+                const auto cell = grid_cell(sums.scope(), grid, neighbor);
+                if (cell.empty())
+                    continue;
+                const auto evidence = measure_cell(sums, cell, grid);
+                if (supports_grid(evidence, grid, 1.25F, 1.1F) ||
+                    supports_band(sums, grid, neighbor, evidence, position.first != neighbor.first)) {
+                    pending.push_back(neighbor);
+                    visited.insert(neighbor);
+                    score += weak_score;
                 }
             }
         }
