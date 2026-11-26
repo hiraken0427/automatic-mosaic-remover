@@ -58,7 +58,7 @@ void weak_boundary_tests() {
     std::cout << "Weak and blurred boundaries cover at least 90% of the mosaic without spill.\n";
 }
 
-void one_direction_tests() {
+void one_direction_tests(bool intermittent) {
     for (const bool transpose : {false, true}) {
         const auto frame = make_raster(transpose ? 202 : 260, transpose ? 260 : 202,
                                        [=](int x, int y) {
@@ -68,7 +68,7 @@ void one_direction_tests() {
                 return (x * 87 + y * 59 + x * y * 13) % 255;
             const int col = (x - 27) / 8, row = (y - 29) / 12;
             if (col < 8 || col >= 16)
-                return 65 + (row * 47) % 125;
+                return 65 + ((intermittent ? row / 3 : row) * 47) % 125;
             return 45 + (col * 61 + row * 41 + col * row * 7) % 160;
         });
         const Rect region = transpose ? Rect{29, 27, 173, 219} : Rect{27, 29, 219, 173};
@@ -166,7 +166,8 @@ int main() {
     using namespace mosaic;
     detection_tests();
     weak_boundary_tests();
-    one_direction_tests();
+    one_direction_tests(false);
+    one_direction_tests(true);
     constexpr int width = 15, height = 9, stride = width * 3 + 5;
     Raster source{width, height, stride, std::vector<std::uint8_t>(height * stride, 231)};
     Raster clean = source;

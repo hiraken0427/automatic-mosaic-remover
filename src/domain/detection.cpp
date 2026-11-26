@@ -223,29 +223,43 @@ Rect grid_cell(Rect scope, Grid grid, Position position) {
 bool supports_band(const GradientSums& sums, Grid grid, Position position,
                    CellEvidence evidence, bool vertical_step) {
     constexpr float floor = 1.25F, ratio = 1.1F;
-    const auto aligned = [&](CellEvidence cell) {
-        return smooth_cell(cell) && (vertical_step
-            ? supports_edge(cell.edge_x, cell.inside_x, floor, ratio)
-            : supports_edge(cell.edge_y, cell.inside_y, floor, ratio));
+    const auto aligned = [&](CellEvidence cell, float minimum, float contrast) {
+        return vertical_step
+            ? supports_edge(cell.edge_x, cell.inside_x, minimum, contrast)
+            : supports_edge(cell.edge_y, cell.inside_y, minimum, contrast);
     };
-    if (!aligned(evidence))
+    if (!smooth_cell(evidence))
+        return false;
+    const bool center = aligned(evidence, floor, ratio);
+    const bool strong_center = aligned(evidence, 3.0F, 2.0F);
+    if (!center && (evidence.inside_x > 3 || evidence.inside_y > 3))
         return false;
 
     const auto [y, x] = position;
     const int dx = vertical_step ? grid.width : 0;
     const int dy = vertical_step ? 0 : grid.height;
-    int support = 1;
+    int support = center;
+    int supported_sides = 0;
     for (const int direction : {-1, 1}) {
+        int side_support = 0;
         for (int offset = 1; offset <= 2; ++offset) {
             const auto cell = grid_cell(sums.scope(), grid,
                                         {y + direction * offset * dy, x + direction * offset * dx});
-            if (cell.empty() || !aligned(measure_cell(sums, cell, grid)))
+            if (cell.empty())
                 break;
-            if (++support == 3)
+            const auto neighbor = measure_cell(sums, cell, grid);
+            if (!smooth_cell(neighbor))
+                break;
+            // An equal-color block can interrupt the seam without interrupting the band.
+            // Cells two steps apart cannot be reporting the same shared edge.
+            if (offset == 2 && strong_center && aligned(neighbor, 3.0F, 2.0F))
                 return true;
+            side_support += aligned(neighbor, floor, ratio);
         }
+        support += side_support;
+        supported_sides += side_support > 0;
     }
-    return false;
+    return center ? support >= 3 : supported_sides == 2;
 }
 
 std::set<Position> bridge_short_gaps(const GradientSums& sums, Grid grid,
